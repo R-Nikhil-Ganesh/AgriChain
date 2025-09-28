@@ -61,34 +61,89 @@ app.use('/api', verifyFirebaseToken);
 // Create a new produce batch
 app.post('/api/produce', async (req, res) => {
   try {
-    const ownerId = req.user.uid;
-    const { cropType, quantity, farmerName, location, farmID } = req.body;
+    const ownerId = req.user?.uid; // farmer Firebase UID from token
+    const { cropType, quantity, unit, farmerName, farmLocation, farmID } = req.body;
+
+    // Validate inputs (farmID still required for your app logic; not sent to chaincode)
+    if (!ownerId || !cropType || !quantity || !unit || !farmerName || !farmLocation || !farmID) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required fields: ownerId (auth), cropType, quantity, unit, farmerName, farmLocation, farmID'
+      });
+    }
+
     const assetID = `BATCH-${Date.now()}`;
-    
-    console.log(`Submitting 'CreateAsset' transaction for asset ${assetID}`);
-    await fabricContract.submitTransaction('CreateAsset', assetID, cropType, quantity, farmerName, location, farmID);
+    console.log(`Submitting 'CreateAsset' tx for asset ${assetID}`);
+    console.log('Batch data (received):', { ownerId, cropType, quantity, unit, farmerName, farmLocation, farmID });
+
+    // Match chaincode signature:
+    // CreateAsset(ctx, id string, cropType string, quantity int, unit string, farmerUID string, farmerName string, farmLocation string)
+    const args = [
+      assetID,
+      String(cropType),
+      String(quantity),
+      String(unit),
+      String(ownerId),      // farmerFirebaseUID (ownerId from token) — this is the important fix
+      String(farmerName),
+      String(farmLocation)
+    ];
+
+    console.log('Submitting args to chaincode:', args);
+
+    try {
+      await fabricContract.submitTransaction('CreateAsset', ...args);
+    } catch (chainErr) {
+      console.error('Chaincode submitTransaction error:', chainErr && chainErr.stack ? chainErr.stack : chainErr);
+      return res.status(500).json({ success: false, message: String(chainErr) });
+    }
+
+    // Optionally: persist farmID to your DB here if you want it stored off-chain
 
     res.status(201).json({ success: true, assetID });
   } catch (error) {
-    console.error(`Failed to submit CreateAsset transaction: ${error}`);
-    res.status(500).json({ success: false, message: error.toString() });
+    console.error('Failed to submit CreateAsset transaction:', error && error.stack ? error.stack : error);
+    res.status(500).json({ success: false, message: (error && error.toString()) || 'Unknown error' });
   }
 });
 
-// Get the history of a specific batch
-// This route does not need to be authenticated if it's for public/consumer use
-app.get('/api/public/produce/:batchId', async (req, res) => {
+
+// Get batches created by the currently logged-in farmer
+app.get('/api/produce/my-batches', async (req, res) => {
   try {
-    const { batchId } = req.params;
-    console.log(`Evaluating 'GetAssetHistory' query for asset ${batchId}`);
-    
-    const resultBytes = await fabricContract.evaluateTransaction('GetAssetHistory', batchId);
-    const resultJson = JSON.parse(resultBytes.toString());
-    
-    res.status(200).json(resultJson);
+    const ownerId = req.user?.uid;
+    if (!ownerId) {
+      return res.status(401).json({ success: false, message: 'Unauthorized: missing user id' });
+    }
+
+    console.log(`Fetching my-batches for farmer UID: ${ownerId}`);
+
+    if (!fabricContract) {
+      console.error('Fabric contract not initialized');
+      return res.status(500).json({ success:false, message: 'Fabric not initialized' });
+    }
+
+    const resultBytes = await fabricContract.evaluateTransaction('GetAllAssets');
+    const raw = resultBytes.toString();
+    let allAssets;
+    try {
+      allAssets = JSON.parse(raw);
+    } catch (e) {
+      console.error('Error parsing GetAllAssets response:', e, 'raw:', raw);
+      return res.status(500).json({ success:false, message: 'Failed to parse assets from chain' });
+    }
+
+    // adjust the property name depending on your chaincode JSON (farmerFirebaseUID in examples)
+    const keyName = allAssets[0] && allAssets[0].farmerFirebaseUID !== undefined ? 'farmerFirebaseUID' : 'FarmerFirebaseUID';
+
+    const myAssets = (Array.isArray(allAssets) ? allAssets : [])
+      .filter(a => a && a[keyName] === ownerId);
+
+    console.log(`Found ${myAssets.length} batches for farmer ${ownerId}`);
+
+    return res.status(200).json({ success: true, count: myAssets.length, assets: myAssets });
   } catch (error) {
-    console.error(`Failed to evaluate GetAssetHistory query: ${error}`);
-    res.status(500).json({ success: false, message: error.toString() });
+    console.error('Error in /api/produce/my-batches:', error);
+    return res.status(500).json({ success: false, message: String(error) });
   }
 });
 
@@ -111,7 +166,8 @@ app.put('/api/produce/:batchId', async (req, res) => {
 });
 
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server is running on port ${PORT}`);
 });
+
 
