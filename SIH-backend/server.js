@@ -165,6 +165,23 @@ app.put('/api/produce/:batchId', async (req, res) => {
     }
 });
 
+// Fetch history of a specific batch
+app.get('/api/produce/:batchId', async (req, res) => {
+  try {
+    const { batchId } = req.params;
+    if (!fabricContract) {
+      return res.status(500).json({ success: false, message: 'Fabric not initialized' });
+    }
+
+    const resultBytes = await fabricContract.evaluateTransaction('GetAssetHistory', batchId);
+    const history = JSON.parse(resultBytes.toString()); // this matches your chaincode return
+
+    res.status(200).json({ success: true, history });
+  } catch (error) {
+    console.error('Failed to fetch batch history:', error);
+    res.status(500).json({ success: false, message: String(error) });
+  }
+});
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server is running on port ${PORT}`);
